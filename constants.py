@@ -18,3 +18,4 @@ light_ree_minerals = list(
 CRITICAL_MINERALS = minerals.union(ree_minerals)
 SPARQL_ENDPOINT = os.environ.get("SPARQL_ENDPOINT", "https://minmod.isi.edu/sparql")
 API_ENDPOINT = os.environ.get("API_ENDPOINT", "https://minmod.isi.edu/api/v1")
+FRONTEND_ENDPOINT = os.environ.get("FRONTEND_ENDPOINT", "https://minmod.isi.edu") #added to run code locally, remove later
