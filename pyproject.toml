@@ -23,6 +23,7 @@ geopandas = "1.0.1"
 gunicorn = "22.0.0"
 aiohttp = "3.8.4"
 dash-bootstrap-components = "^1.6.0"
+psycopg = {version = "<3.3", extras = ["binary"]}
 
 
 [build-system]
