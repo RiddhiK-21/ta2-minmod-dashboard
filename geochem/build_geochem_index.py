@@ -12,13 +12,16 @@ Design notes:
     10,000s of papers that risks timeouts and memory pressure on a shared server.
   - paper_commodities is derived in SQL from measurements, not fetched separately.
 
-Usage:
-    python build_geochem_index.py                 # incremental
-    python build_geochem_index.py --rebuild       # wipe and reprocess everything
-    python build_geochem_index.py --limit 5       # only process 5 new papers (testing)
+Usage (run from the repo root -- constants.py reads critical_minerals.yaml relative to CWD):
+    python geochem/build_geochem_index.py                 # incremental
+    python geochem/build_geochem_index.py --rebuild       # wipe and reprocess everything
+    python geochem/build_geochem_index.py --limit 5       # only process 5 new papers (testing)
 """
 
+from __future__ import annotations
+
 import argparse
+import os
 import sys
 import time
 from typing import Any, Iterator
@@ -26,10 +29,9 @@ from typing import Any, Iterator
 import psycopg
 import requests
 
-# Standalone defaults so the script runs outside the Dash app too.
-# When wiring into the repo, import these from constants.py instead.
-SPARQL_ENDPOINT = "http://dev.minmod.isi.edu:3030/minmod/sparql"
-PG_DSN = "postgresql://geochem:geochem@localhost:5432/geochem"
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from constants import GEOCHEM_SPARQL_ENDPOINT as SPARQL_ENDPOINT
+from constants import GEOCHEM_PG_DSN as PG_DSN
 
 PREFIXES = """
 PREFIX gc:   <https://geochemistry.isi.edu/ontology/>
@@ -92,13 +94,34 @@ def fetch_all_paper_uris() -> list[str]:
     return [r["paper"] for r in rows]
 
 
+def resolve_year(raw_year: str | None, paper_id: str | None) -> int | None:
+    """gc:paper_year exists in the source extraction (confirmed in a raw
+    JSON-LD extract -- "paper_year": 2022) but is missing from the RDF
+    triples actually loaded into Fuseki for every paper checked so far
+    (confirmed live via a full predicate dump -- ingestion drops it
+    upstream, not a query issue). Prefer the real predicate so this
+    self-corrects once ingestion is fixed; fall back to the leading
+    4-digit year every paper_id starts with (e.g. "2004_Ono_etal", or
+    "2020A_Cave_etal" when a year/author combo has multiple papers)."""
+    if raw_year and raw_year.isdigit():
+        year = int(raw_year)
+        if 1900 <= year <= 2100:
+            return year
+    if paper_id and len(paper_id) >= 4 and paper_id[:4].isdigit():
+        year = int(paper_id[:4])
+        if 1900 <= year <= 2100:
+            return year
+    return None
+
+
 def fetch_paper_metadata(paper_uris: list[str]) -> list[dict]:
     rows = sparql(f"""
-    SELECT ?paper ?title ?doi ?year ?journal
+    SELECT ?paper ?title ?doi ?id ?year ?journal
     WHERE {{
       VALUES ?paper {{ {values_clause(paper_uris)} }}
       OPTIONAL {{ ?paper gc:paper_title   ?title }}
       OPTIONAL {{ ?paper gc:paper_doi     ?doi }}
+      OPTIONAL {{ ?paper gc:paper_id      ?id }}
       OPTIONAL {{ ?paper gc:paper_year    ?year }}
       OPTIONAL {{ ?paper gc:paper_journal ?journal }}
     }}
@@ -112,13 +135,18 @@ def fetch_paper_metadata(paper_uris: list[str]) -> list[dict]:
 
 
 def fetch_sites(paper_uris: list[str]) -> list[dict]:
+    # NOTE: mo:name does not exist on Site nodes (confirmed via a live predicate
+    # dump) -- the site's display name is rdfs:label. mo:country and
+    # mo:state_or_province are not literals; each points to a CandidateEntity
+    # node one hop away whose actual value lives on mo:observed_name.
     rows = sparql(f"""
-    SELECT ?paper ?site ?name ?country ?primary ?secondary ?dtText ?dtConf
+    SELECT ?paper ?site ?name ?country ?state ?primary ?secondary ?dtText ?dtConf
     WHERE {{
       VALUES ?paper {{ {values_clause(paper_uris)} }}
       ?paper gc:has_mineral_site ?site .
-      OPTIONAL {{ ?site mo:name                  ?name }}
-      OPTIONAL {{ ?site mo:country               ?country }}
+      OPTIONAL {{ ?site rdfs:label                ?name }}
+      OPTIONAL {{ ?site mo:country/mo:observed_name          ?country }}
+      OPTIONAL {{ ?site mo:state_or_province/mo:observed_name ?state }}
       OPTIONAL {{ ?site mo:primary_commodities   ?primary }}
       OPTIONAL {{ ?site mo:secondary_commodities ?secondary }}
       OPTIONAL {{
@@ -137,8 +165,8 @@ def fetch_sites(paper_uris: list[str]) -> list[dict]:
 def fetch_measurements(paper_uris: list[str]) -> list[dict]:
     """The heavy query. Walks paper -> site -> sample -> analysis -> element."""
     return sparql(f"""
-    SELECT ?site ?sample ?sampleId ?sampleLocalId ?sampleName ?sampleType
-           ?analysis ?method ?elementLabel ?grade ?gradeUnit ?detectionLimit
+    SELECT ?site ?sample ?sampleId ?sampleLocalId ?sampleName ?sampleType ?mineral
+           ?analysis ?analysisId ?method ?elementLabel ?grade ?gradeUnit ?detectionLimit
     WHERE {{
       VALUES ?paper {{ {values_clause(paper_uris)} }}
       ?paper gc:has_mineral_site ?site .
@@ -147,9 +175,11 @@ def fetch_measurements(paper_uris: list[str]) -> list[dict]:
       OPTIONAL {{ ?sample gc:sample_local_id ?sampleLocalId }}
       OPTIONAL {{ ?sample gc:sample_name     ?sampleName }}
       OPTIONAL {{ ?sample gc:sample_type     ?sampleType }}
+      OPTIONAL {{ ?sample gc:mineral         ?mineral }}
 
       ?sample   gc:has_analysis ?analysis .
       OPTIONAL {{ ?analysis gc:analytical_method ?method }}
+      OPTIONAL {{ ?analysis gc:analysis_id       ?analysisId }}
 
       ?analysis gc:element ?element .
       ?element  rdfs:label ?elementLabel .
@@ -182,7 +212,7 @@ def upsert_papers(conn, papers: list[dict]) -> None:
                     p["paper"],
                     p.get("title"),
                     p.get("doi"),
-                    int(p["year"]) if p.get("year", "").isdigit() else None,
+                    resolve_year(p.get("year"), p.get("id")),
                     p.get("journal"),
                 )
                 for p in papers
@@ -194,10 +224,10 @@ def upsert_sites(conn, sites: list[dict]) -> None:
     with conn.cursor() as cur:
         cur.executemany(
             """
-            INSERT INTO sites (site_uri, paper_uri, name, country,
+            INSERT INTO sites (site_uri, paper_uri, name, country, state,
                                primary_commodities, secondary_commodities,
                                deposit_type_text, deposit_type_confidence)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (site_uri) DO NOTHING
             """,
             [
@@ -206,6 +236,7 @@ def upsert_sites(conn, sites: list[dict]) -> None:
                     s["paper"],
                     s.get("name"),
                     s.get("country"),
+                    s.get("state"),
                     s.get("primary"),
                     s.get("secondary"),
                     s.get("dtText"),
@@ -229,6 +260,7 @@ def upsert_samples_and_measurements(conn, rows: list[dict]) -> tuple[int, int]:
                 r.get("sampleLocalId"),
                 r.get("sampleName"),
                 r.get("sampleType"),
+                r.get("mineral"),
             ),
         )
 
@@ -236,8 +268,8 @@ def upsert_samples_and_measurements(conn, rows: list[dict]) -> tuple[int, int]:
         cur.executemany(
             """
             INSERT INTO samples (sample_uri, site_uri, sample_id,
-                                 sample_local_id, sample_name, sample_type)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                                 sample_local_id, sample_name, sample_type, mineral)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (sample_uri) DO NOTHING
             """,
             list(samples.values()),
@@ -245,15 +277,16 @@ def upsert_samples_and_measurements(conn, rows: list[dict]) -> tuple[int, int]:
 
         cur.executemany(
             """
-            INSERT INTO measurements (sample_uri, analysis_uri, analytical_method,
-                                      element_label, grade, grade_raw,
-                                      grade_unit_uri, detection_limit)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO measurements (sample_uri, analysis_uri, analysis_id,
+                                      analytical_method, element_label, grade,
+                                      grade_raw, grade_unit_uri, detection_limit)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [
                 (
                     r["sample"],
                     r.get("analysis"),
+                    r.get("analysisId"),
                     r.get("method"),
                     r.get("elementLabel"),
                     to_float(r.get("grade")),

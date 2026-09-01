@@ -1,25 +1,16 @@
-import re
-from urllib.parse import quote
-
 import dash
 from dash import html, callback, dcc
 import dash_bootstrap_components as dbc
 from dash.dependencies import Input, Output, State
-from helpers import kpis
-from helpers import sparql_utils
 from dash_ag_grid import AgGrid
-from models import MineralSite
-from dash.exceptions import PreventUpdate
-from helpers.exceptions import MinModException
+
+from geochem import queries
 
 
 dash.register_page(__name__, path="/byproduct", name="By-Product Data")
 
-EXCLUDED_COLUMNS = [
-    "Mineral Site Type",
-    "Mineral Site Rank",
-    "Deposit Classification Source",
-]
+DEFAULT_COL_DEF = {"resizable": True, "sortable": True, "filter": True}
+GRID_STYLE = {"width": "100%", "height": "50vh"}
 
 layout = html.Div(
     [
@@ -31,55 +22,54 @@ layout = html.Div(
                         dbc.Label("Commodity"),
                         dbc.Spinner(
                             dcc.Dropdown(
-                                id="commodity-byproduct",
-                                options=[
-                                    {"label": commodity, "value": commodity}
-                                    for commodity in kpis.get_commodities()
-                                ],
-                                search_value="",
+                                id="bp-commodity",
+                                options=[],
                                 placeholder="Search Commodity",
                             ),
                         ),
                     ],
-                    width=3,
-                ),
-                dbc.Col(
-                    [
-                        dbc.Label("Deposit Type"),
-                        dcc.Dropdown(
-                            id="deposit_type-byproduct",
-                            options=[],
-                            multi=True,
-                            search_value="",
-                            placeholder="Search Deposit Type",
-                        ),
-                    ],
-                    width=3,
+                    width=4,
                 ),
                 dbc.Col(
                     [
                         dbc.Label("Country"),
                         dcc.Dropdown(
-                            id="country-byproduct",
+                            id="bp-country",
                             options=[],
-                            multi=True,
-                            search_value="",
                             placeholder="Search Country",
                         ),
                     ],
-                    width=3,
+                    width=4,
                 ),
             ]
         ),
         html.Br(),
-        html.Br(),
-        html.Br(),
+        html.H5("Papers"),
         dbc.Row(
             dbc.Spinner(
-                html.Div(id="byproduct-results"),
+                html.Div(id="bp-papers-results"),
                 color="primary",
                 type="border",
-                fullscreen=False,
+                size="lg",
+            )
+        ),
+        html.Br(),
+        html.H5("Deposits"),
+        dbc.Row(
+            dbc.Spinner(
+                html.Div(id="bp-deposits-results"),
+                color="primary",
+                type="border",
+                size="lg",
+            )
+        ),
+        html.Br(),
+        html.H5("Samples"),
+        dbc.Row(
+            dbc.Spinner(
+                html.Div(id="bp-samples-results"),
+                color="primary",
+                type="border",
                 size="lg",
             )
         ),
@@ -88,191 +78,156 @@ layout = html.Div(
 )
 
 
-@callback(
-    Output("commodity-byproduct", "options"),
-    Input(
-        "url-byproduct", "pathname"
-    ),  # This triggers the callback when the page is refreshed or the URL changes
-)
-def update_commodity_dropdown(pathname):
-    options = [
-        {"label": commodity, "value": commodity} for commodity in kpis.get_commodities()
-    ]
-    return options
-
-
-@callback(
-    [
-        Output("deposit_type-byproduct", "options"),
-        Output("country-byproduct", "options"),
-        Output("byproduct-results", "children"),
-    ],
-    [
-        Input("commodity-byproduct", "value"),
-        Input("deposit_type-byproduct", "value"),
-        Input("country-byproduct", "value"),
-    ],
-    [State("deposit_type-byproduct", "options"), State("country-byproduct", "options")],
-    prevent_initial_call=True,
-)
-def update_dashboard(
-    selected_commodity,
-    selected_deposit_types,
-    selected_countries,
-    current_deposit_options,
-    current_country_options,
-):
-    """A callback to update the table data, and dropdown values"""
-    ctx = dash.callback_context
-
-    if not ctx.triggered:
-        raise PreventUpdate
-
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-
-    if trigger_id == "commodity-byproduct" and selected_commodity:
-        deposit_options = []
-        country_options = []
-        # Initial grid update with new commodity selection
-        ms = MineralSite(commodity=selected_commodity)
-        try:
-            ms.init()
-            df = ms.df
-            # Update deposit type options based on the selected commodity
-            deposit_options = [{"label": dt, "value": dt} for dt in ms.deposit_types]
-
-            # Update country options based on the selected commodity
-            country_options = [
-                {"label": country, "value": country} for country in ms.country
-            ]
-        except MinModException as e:
-            return (
-                deposit_options,
-                country_options,
-                dbc.Alert(
-                    str(e),
-                    color="danger",
-                ),
-            )
-
-        except Exception as e:
-            return (
-                deposit_options,
-                country_options,
-                dbc.Alert(
-                    "No results found or there was an error with the query.",
-                    color="danger",
-                ),
-            )
-
-        grid_content = update_grid(df)
-        return deposit_options, country_options, grid_content
-
-    elif trigger_id in ["deposit_type-byproduct", "country-byproduct"]:
-        # Refilter based on both deposit type and country
-        ms = MineralSite(commodity=selected_commodity)
-        try:
-            ms.init()
-            df = ms.df
-
-            if selected_deposit_types:
-                df = df[df["Deposit Type"].isin(selected_deposit_types)]
-                # Refilter countries based on deposit type
-                filtered_countries = df["Country"].unique()
-                country_options = [
-                    {"label": country, "value": country}
-                    for country in filtered_countries
-                ]
-            else:
-                country_options = current_country_options
-
-            if selected_countries:
-                df = df[df["Country"].isin(selected_countries)]
-
-        except Exception as e:
-            return (
-                current_deposit_options,
-                current_country_options,
-                dbc.Alert(
-                    "No results found or there was an error with the query.",
-                    color="danger",
-                ),
-            )
-
-        grid_content = update_grid(df)
-        return current_deposit_options, country_options, grid_content
-
-    raise PreventUpdate
-
-
-def build_paper_link(mineral_site_name):
-    """Builds a '<Site Name> Papers' markdown link from a 'Mineral Site Name' markdown cell"""
-    match = re.match(r"\[(.*?)\]\(.*\)", mineral_site_name)
-    name = match.group(1) if match else mineral_site_name
-    relative_path = dash.get_relative_path(f"/paper/{quote(name)}")
-    return f"[{name} Papers]({relative_path})"
-
-
-def update_grid(df):
-    df = sparql_utils.infer_and_convert_types(df, round_flag=True)
-    if df is not None and not df.empty:
-        df = df.copy()
-        df["Paper Link"] = df["Mineral Site Name"].apply(build_paper_link)
-        df = df.drop(columns=EXCLUDED_COLUMNS, errors="ignore")
-
-        column_defs = []
-        for col in df.columns:
-            if col in ("Mineral Site Name", "Paper Link"):
-                column_defs.append(
-                    {
-                        "headerName": col,
-                        "field": col,
-                        "cellRenderer": "markdown",
-                        "linkTarget": "_blank",
-                    }
-                )
-            else:
-                column_defs.append(
-                    {"headerName": col, "field": col, "cellRenderer": "urlLink"}
-                )
-
-        column_defs.insert(
-            0, {"headerName": "Row ID", "valueGetter": {"function": "params.node.id"}}
-        )
-        return html.Div(
-            [
-                AgGrid(
-                    id="byproduct_table",
-                    style={"width": "100%", "height": "70vh"},
-                    columnDefs=column_defs,
-                    rowData=df.to_dict("records"),
-                    columnSize="responsiveSizeToFit",
-                    defaultColDef={"resizable": True, "sortable": True, "filter": True},
-                    dashGridOptions={
-                        "pagination": True,
-                        "paginationPageSize": 20,
-                        "suppressFieldDotNotation": True,
-                        "enableCellTextSelection": True,
-                    },
-                    csvExportParams={"fileName": "export_data.csv"},
-                ),
-                html.Br(),
-                html.Div(
-                    dbc.Button("Download CSV", id="byproduct-csv-button", n_clicks=0),
-                    className="d-grid col-2 mx-auto",
-                    style={"float": "right", "margin-top": "-15px", "width": "10%"},
-                ),
-            ]
-        )
+def _no_results_alert():
     return dbc.Alert("No results found.", color="danger")
 
 
+def _build_papers_grid(papers):
+    rows = []
+    for p in papers:
+        row = dict(p)
+        row["doi_link"] = f"[{p['doi']}](https://doi.org/{p['doi']})" if p.get("doi") else None
+        rows.append(row)
+
+    column_defs = [
+        {"headerName": "Title", "field": "title"},
+        {"headerName": "Journal", "field": "journal"},
+        {"headerName": "Year", "field": "year"},
+        {
+            "headerName": "DOI",
+            "field": "doi_link",
+            "cellRenderer": "markdown",
+            "cellRendererParams": {"linkTarget": "_blank"},
+        },
+    ]
+    return AgGrid(
+        id="bp-papers-grid",
+        style=GRID_STYLE,
+        columnDefs=column_defs,
+        rowData=rows,
+        columnSize="responsiveSizeToFit",
+        defaultColDef=DEFAULT_COL_DEF,
+        dashGridOptions={
+            "rowSelection": "single",
+            "pagination": True,
+            "paginationPageSize": 20,
+            "suppressFieldDotNotation": True,
+            "enableCellTextSelection": True,
+            "getRowId": {"function": "params.data.paper_uri"},
+        },
+    )
+
+
+def _build_deposits_grid(deposits):
+    column_defs = [
+        {"headerName": "Deposit Name", "field": "deposit_name"},
+        {"headerName": "Country", "field": "country"},
+        {"headerName": "State", "field": "state"},
+        {"headerName": "Deposit Type", "field": "deposit_type_text"},
+        {"headerName": "Confidence", "field": "deposit_type_confidence"},
+    ]
+    return AgGrid(
+        id="bp-deposits-grid",
+        style=GRID_STYLE,
+        columnDefs=column_defs,
+        rowData=deposits,
+        columnSize="responsiveSizeToFit",
+        defaultColDef=DEFAULT_COL_DEF,
+        dashGridOptions={
+            "rowSelection": "single",
+            "pagination": True,
+            "paginationPageSize": 20,
+            "suppressFieldDotNotation": True,
+            "enableCellTextSelection": True,
+            "getRowId": {"function": "params.data.site_uri"},
+        },
+    )
+
+
+def _build_samples_grid(samples):
+    column_defs = [
+        {"headerName": "Sample ID", "field": "sample_id"},
+        {"headerName": "Sample Name", "field": "sample_name"},
+        {"headerName": "Sample Mineral", "field": "mineral"},
+        {"headerName": "Analysis ID", "field": "analysis_id"},
+        {"headerName": "Grade(ppm)", "field": "grade"},
+        {"headerName": "Method", "field": "analytical_method"},
+    ]
+    return AgGrid(
+        id="bp-samples-grid",
+        style=GRID_STYLE,
+        columnDefs=column_defs,
+        rowData=samples,
+        columnSize="responsiveSizeToFit",
+        defaultColDef=DEFAULT_COL_DEF,
+        dashGridOptions={
+            "pagination": True,
+            "paginationPageSize": 20,
+            "suppressFieldDotNotation": True,
+            "enableCellTextSelection": True,
+            "getRowId": {"function": "params.data.measurement_id.toString()"},
+        },
+    )
+
+
 @callback(
-    Output("byproduct_table", "exportDataAsCsv"),
-    Input("byproduct-csv-button", "n_clicks"),
+    Output("bp-commodity", "options"),
+    Input("url-byproduct", "pathname"),
 )
-def export_data_as_csv(n_clicks):
-    """A callback to handle the download button"""
-    if n_clicks:
-        return True
-    return False
+def bp_load_commodities(pathname):
+    return [{"label": c, "value": c} for c in queries.get_commodities()]
+
+
+@callback(
+    Output("bp-country", "options"),
+    Output("bp-papers-results", "children"),
+    Output("bp-deposits-results", "children"),
+    Output("bp-samples-results", "children"),
+    Input("bp-commodity", "value"),
+    Input("bp-country", "value"),
+    prevent_initial_call=True,
+)
+def bp_update_papers(commodity, country):
+    if not commodity:
+        return [], html.Div(), html.Div(), html.Div()
+
+    country_options = [{"label": c, "value": c} for c in queries.get_countries(commodity)]
+
+    papers = queries.get_papers(commodity, country)
+    papers_grid = _build_papers_grid(papers) if papers else _no_results_alert()
+
+    return country_options, papers_grid, html.Div(), html.Div()
+
+
+@callback(
+    Output("bp-deposits-results", "children", allow_duplicate=True),
+    Output("bp-samples-results", "children", allow_duplicate=True),
+    Input("bp-papers-grid", "selectedRows"),
+    State("bp-commodity", "value"),
+    prevent_initial_call=True,
+)
+def bp_update_deposits(selected_rows, commodity):
+    if not selected_rows or not commodity:
+        return html.Div(), html.Div()
+
+    paper_uri = selected_rows[0]["paper_uri"]
+    deposits = queries.get_deposits(paper_uri, commodity)
+    deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
+
+    return deposits_grid, html.Div()
+
+
+@callback(
+    Output("bp-samples-results", "children", allow_duplicate=True),
+    Input("bp-deposits-grid", "selectedRows"),
+    State("bp-commodity", "value"),
+    prevent_initial_call=True,
+)
+def bp_update_samples(selected_rows, commodity):
+    if not selected_rows or not commodity:
+        return html.Div()
+
+    site_uri = selected_rows[0]["site_uri"]
+    samples = queries.get_samples(site_uri, commodity)
+
+    return _build_samples_grid(samples) if samples else _no_results_alert()

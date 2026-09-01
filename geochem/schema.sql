@@ -26,6 +26,7 @@ CREATE TABLE sites (
     paper_uri                TEXT REFERENCES papers(paper_uri) ON DELETE CASCADE,
     name                     TEXT,          -- "deposit name" shown in the expanded table
     country                  TEXT,          -- sparse (~30% coverage)
+    state                    TEXT,          -- state/province, same sparsity as country
     -- Informational only. NOT the source for the commodity filter -- that comes
     -- from measured Element labels. Kept for a future site detail view.
     primary_commodities      TEXT,
@@ -43,7 +44,8 @@ CREATE TABLE samples (
     sample_id        TEXT,   -- candidate for "sample number"
     sample_local_id  TEXT,   -- other candidate; confirm which one the team means
     sample_name      TEXT,
-    sample_type      TEXT
+    sample_type      TEXT,
+    mineral          TEXT    -- host mineral analyzed, e.g. "sphalerite"
 );
 CREATE INDEX idx_samples_site ON samples(site_uri);
 
@@ -52,6 +54,7 @@ CREATE TABLE measurements (
     id                 BIGSERIAL PRIMARY KEY,
     sample_uri         TEXT REFERENCES samples(sample_uri) ON DELETE CASCADE,
     analysis_uri       TEXT,
+    analysis_id        TEXT,    -- short human analysis id, e.g. "LA1-1_1_AG"
     analytical_method  TEXT,
     element_label      TEXT,    -- from Element rdfs:label, e.g. "Ag"
     grade              DOUBLE PRECISION,

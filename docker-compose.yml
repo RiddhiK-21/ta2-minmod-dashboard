@@ -1,6 +1,22 @@
-version: "3.8"
-
 services:
+  postgres:
+    image: postgres:16
+    container_name: geochem-postgres
+    environment:
+      - POSTGRES_DB=geochem
+      - POSTGRES_USER=geochem
+      - POSTGRES_PASSWORD=geochem
+    ports:
+      - "5432:5432"
+    volumes:
+      - geochem_pgdata:/var/lib/postgresql/data
+      - ./geochem/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geochem -d geochem"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   dashboard:
     build:
       context: .
@@ -8,8 +24,16 @@ services:
     image: minmod-dashboard
     ports:
       - "8050:8050"
-    environment: 
-      - API_ENDPOINT=${API_ENDPOINT}
-      - SPARQL_ENDPOINT=${SPARQL_ENDPOINT}
+    environment:
+      - API_ENDPOINT=${API_ENDPOINT:-https://minmod.isi.edu/api/v1}
+      - SPARQL_ENDPOINT=${SPARQL_ENDPOINT:-https://minmod.isi.edu/sparql}
+      - GEOCHEM_SPARQL_ENDPOINT=${GEOCHEM_SPARQL_ENDPOINT:-http://dev.minmod.isi.edu:3030/minmod/sparql}
+      - GEOCHEM_PG_DSN=postgresql://geochem:geochem@postgres:5432/geochem
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: "poetry run python app.py"
 
+volumes:
+  geochem_pgdata:
+    external: true
