@@ -165,3 +165,5 @@ cython_debug/
 Claude.md
 
 .playwright-mcp/
+
+geochem/benchmark_sparql_vs_postgres.py

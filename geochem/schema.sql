@@ -1,8 +1,4 @@
--- GeoChem By-Product tab: Postgres index schema
--- Populated from the Fuseki SPARQL endpoint by build_geochem_index.py
---
--- Run with:
---   docker exec -i geochem-postgres psql -U geochem -d geochem < schema.sql
+
 
 DROP TABLE IF EXISTS paper_commodities CASCADE;
 DROP TABLE IF EXISTS measurements CASCADE;
@@ -17,7 +13,7 @@ CREATE TABLE papers (
     doi         TEXT,
     year        INTEGER,
     journal     TEXT,
-    indexed_at  TIMESTAMPTZ DEFAULT now()   -- lets you see what the last build touched
+    indexed_at  TIMESTAMPTZ DEFAULT now()   
 );
 
 
@@ -27,8 +23,7 @@ CREATE TABLE sites (
     name                     TEXT,          -- "deposit name" shown in the expanded table
     country                  TEXT,          -- sparse (~30% coverage)
     state                    TEXT,          -- state/province, same sparsity as country
-    -- Informational only. NOT the source for the commodity filter -- that comes
-    -- from measured Element labels. Kept for a future site detail view.
+   
     primary_commodities      TEXT,
     secondary_commodities    TEXT,
     deposit_type_text        TEXT,
