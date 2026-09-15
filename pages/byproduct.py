@@ -4,7 +4,9 @@ import dash_bootstrap_components as dbc
 from dash.dependencies import Input, Output, State
 from dash_ag_grid import AgGrid
 
+from components import stats_card
 from geochem import queries
+from logger_config import logger
 
 
 dash.register_page(__name__, path="/byproduct", name="By-Product Data")
@@ -73,6 +75,16 @@ layout = html.Div(
                 size="lg",
             )
         ),
+        html.Br(),
+        html.H5("Grade Summary"),
+        dbc.Row(
+            dbc.Spinner(
+                html.Div(id="bp-summary-results"),
+                color="primary",
+                type="border",
+                size="lg",
+            )
+        ),
     ],
     style={"margin": "20px"},
 )
@@ -80,6 +92,14 @@ layout = html.Div(
 
 def _no_results_alert():
     return dbc.Alert("No results found.", color="danger")
+
+
+def _error_alert(exc):
+    """Distinct from _no_results_alert: "the query could not run" must not
+    read as "this commodity has no data"."""
+    return dbc.Alert(
+        [html.Strong("GeoChem data unavailable. "), str(exc)], color="danger"
+    )
 
 
 def _build_papers_grid(papers):
@@ -165,8 +185,37 @@ def _build_samples_grid(samples):
             "paginationPageSize": 20,
             "suppressFieldDotNotation": True,
             "enableCellTextSelection": True,
-            "getRowId": {"function": "params.data.measurement_id.toString()"},
+            "getRowId": {"function": "params.data.measurement_id"},
         },
+    )
+
+
+def _build_grade_summary(stats):
+    commodity = stats["commodity"]
+
+    if stats["count"] == 0:
+        return html.Div(
+            [
+                html.H5(commodity),
+                dbc.Alert(
+                    f"No numeric grade data available for {commodity} in this paper.",
+                    color="danger",
+                ),
+            ]
+        )
+
+    return html.Div(
+        [
+            html.H5(commodity),
+            dbc.Row(
+                [
+                    dbc.Col(stats_card("Min", round(stats["min"], 3)), width=3),
+                    dbc.Col(stats_card("Max", round(stats["max"], 3)), width=3),
+                    dbc.Col(stats_card("Avg", round(stats["avg"], 3)), width=3),
+                    dbc.Col(stats_card("Median", round(stats["median"], 3)), width=3),
+                ]
+            ),
+        ]
     )
 
 
@@ -175,7 +224,13 @@ def _build_samples_grid(samples):
     Input("url-byproduct", "pathname"),
 )
 def bp_load_commodities(pathname):
-    return [{"label": c, "value": c} for c in queries.get_commodities()]
+    # Must degrade rather than raise: if this throws, the page renders
+    # nothing at all, not even the layout.
+    try:
+        return [{"label": c, "value": c} for c in queries.get_commodities()]
+    except queries.GeochemQueryError:
+        logger.exception("Could not load GeoChem commodities")
+        return []
 
 
 @callback(
@@ -183,38 +238,57 @@ def bp_load_commodities(pathname):
     Output("bp-papers-results", "children"),
     Output("bp-deposits-results", "children"),
     Output("bp-samples-results", "children"),
+    Output("bp-summary-results", "children"),
     Input("bp-commodity", "value"),
     Input("bp-country", "value"),
     prevent_initial_call=True,
 )
 def bp_update_papers(commodity, country):
     if not commodity:
-        return [], html.Div(), html.Div(), html.Div()
+        return [], html.Div(), html.Div(), html.Div(), html.Div()
 
-    country_options = [{"label": c, "value": c} for c in queries.get_countries(commodity)]
+    # One try around both queries -- either failing means the same thing to
+    # the user.
+    try:
+        country_options = [
+            {"label": c, "value": c} for c in queries.get_countries(commodity)
+        ]
+        papers = queries.get_papers(commodity, country)
+    except queries.GeochemQueryError as exc:
+        logger.exception("Could not load GeoChem papers for %s", commodity)
+        return [], _error_alert(exc), html.Div(), html.Div(), html.Div()
 
-    papers = queries.get_papers(commodity, country)
     papers_grid = _build_papers_grid(papers) if papers else _no_results_alert()
 
-    return country_options, papers_grid, html.Div(), html.Div()
+    # A new commodity/country selection invalidates the old paper-level
+    # summary, same as Deposits and Samples.
+    return country_options, papers_grid, html.Div(), html.Div(), html.Div()
 
 
 @callback(
     Output("bp-deposits-results", "children", allow_duplicate=True),
     Output("bp-samples-results", "children", allow_duplicate=True),
+    Output("bp-summary-results", "children", allow_duplicate=True),
     Input("bp-papers-grid", "selectedRows"),
     State("bp-commodity", "value"),
     prevent_initial_call=True,
 )
 def bp_update_deposits(selected_rows, commodity):
     if not selected_rows or not commodity:
-        return html.Div(), html.Div()
+        return html.Div(), html.Div(), html.Div()
 
     paper_uri = selected_rows[0]["paper_uri"]
-    deposits = queries.get_deposits(paper_uri, commodity)
-    deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
+    try:
+        deposits = queries.get_deposits(paper_uri, commodity)
+        stats = queries.get_grade_stats(paper_uri, commodity)
+    except queries.GeochemQueryError as exc:
+        logger.exception("Could not load GeoChem deposits for %s", paper_uri)
+        return _error_alert(exc), html.Div(), _error_alert(exc)
 
-    return deposits_grid, html.Div()
+    deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
+    summary = _build_grade_summary(stats)
+
+    return deposits_grid, html.Div(), summary
 
 
 @callback(
@@ -228,6 +302,10 @@ def bp_update_samples(selected_rows, commodity):
         return html.Div()
 
     site_uri = selected_rows[0]["site_uri"]
-    samples = queries.get_samples(site_uri, commodity)
+    try:
+        samples = queries.get_samples(site_uri, commodity)
+    except queries.GeochemQueryError as exc:
+        logger.exception("Could not load GeoChem samples for %s", site_uri)
+        return _error_alert(exc)
 
     return _build_samples_grid(samples) if samples else _no_results_alert()

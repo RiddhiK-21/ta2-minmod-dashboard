@@ -22,4 +22,3 @@ FRONTEND_ENDPOINT = os.environ.get("FRONTEND_ENDPOINT", "https://minmod.isi.edu"
 
 #geochem
 GEOCHEM_SPARQL_ENDPOINT = os.environ.get("GEOCHEM_SPARQL_ENDPOINT", "http://dev.minmod.isi.edu:3030/minmod/sparql")
-GEOCHEM_PG_DSN = os.environ.get("GEOCHEM_PG_DSN", "postgresql://geochem:geochem@localhost:5432/geochem")

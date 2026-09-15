@@ -1,22 +1,7 @@
 services:
-  postgres:
-    image: postgres:16
-    container_name: geochem-postgres
-    environment:
-      - POSTGRES_DB=geochem
-      - POSTGRES_USER=geochem
-      - POSTGRES_PASSWORD=geochem
-    ports:
-      - "5432:5432"
-    volumes:
-      - geochem_pgdata:/var/lib/postgresql/data
-      - ./geochem/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U geochem -d geochem"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
+  # The By-Product tab queries the GeoChem Fuseki store live, so the host
+  # must be able to reach GEOCHEM_SPARQL_ENDPOINT (ISI VPN) while the
+  # dashboard is running -- not just at build time.
   dashboard:
     build:
       context: .
@@ -28,12 +13,4 @@ services:
       - API_ENDPOINT=${API_ENDPOINT:-https://minmod.isi.edu/api/v1}
       - SPARQL_ENDPOINT=${SPARQL_ENDPOINT:-https://minmod.isi.edu/sparql}
       - GEOCHEM_SPARQL_ENDPOINT=${GEOCHEM_SPARQL_ENDPOINT:-http://dev.minmod.isi.edu:3030/minmod/sparql}
-      - GEOCHEM_PG_DSN=postgresql://geochem:geochem@postgres:5432/geochem
-    depends_on:
-      postgres:
-        condition: service_healthy
     command: "poetry run python app.py"
-
-volumes:
-  geochem_pgdata:
-    external: true
