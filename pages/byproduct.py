@@ -190,15 +190,17 @@ def _build_samples_grid(samples):
     )
 
 
-def _build_grade_summary(stats):
+def _build_grade_summary(stats, deposit_name=None):
     commodity = stats["commodity"]
+    # deposit_name is an OPTIONAL in _DEPOSITS, so it can be unbound.
+    heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
 
     if stats["count"] == 0:
         return html.Div(
             [
-                html.H5(commodity),
+                html.H5(heading),
                 dbc.Alert(
-                    f"No numeric grade data available for {commodity} in this paper.",
+                    f"No numeric grade data available for {commodity} at this deposit.",
                     color="danger",
                 ),
             ]
@@ -206,7 +208,7 @@ def _build_grade_summary(stats):
 
     return html.Div(
         [
-            html.H5(commodity),
+            html.H5(heading),
             dbc.Row(
                 [
                     dbc.Col(stats_card("Min", round(stats["min"], 3)), width=3),
@@ -280,32 +282,41 @@ def bp_update_deposits(selected_rows, commodity):
     paper_uri = selected_rows[0]["paper_uri"]
     try:
         deposits = queries.get_deposits(paper_uri, commodity)
-        stats = queries.get_grade_stats(paper_uri, commodity)
     except queries.GeochemQueryError as exc:
         logger.exception("Could not load GeoChem deposits for %s", paper_uri)
-        return _error_alert(exc), html.Div(), _error_alert(exc)
+        return _error_alert(exc), html.Div(), html.Div()
 
     deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
-    summary = _build_grade_summary(stats)
 
-    return deposits_grid, html.Div(), summary
+    # The summary describes one deposit, and selecting a new paper leaves none
+    # selected -- so it clears here and is filled by bp_update_samples.
+    return deposits_grid, html.Div(), html.Div()
 
 
 @callback(
     Output("bp-samples-results", "children", allow_duplicate=True),
+    Output("bp-summary-results", "children", allow_duplicate=True),
     Input("bp-deposits-grid", "selectedRows"),
     State("bp-commodity", "value"),
     prevent_initial_call=True,
 )
 def bp_update_samples(selected_rows, commodity):
     if not selected_rows or not commodity:
-        return html.Div()
+        return html.Div(), html.Div()
 
     site_uri = selected_rows[0]["site_uri"]
+    deposit_name = selected_rows[0].get("deposit_name")
     try:
         samples = queries.get_samples(site_uri, commodity)
     except queries.GeochemQueryError as exc:
         logger.exception("Could not load GeoChem samples for %s", site_uri)
-        return _error_alert(exc)
+        return _error_alert(exc), html.Div()
 
-    return _build_samples_grid(samples) if samples else _no_results_alert()
+    samples_grid = _build_samples_grid(samples) if samples else _no_results_alert()
+    # Derived from the rows just fetched, so the summary cannot disagree with
+    # the grid above it.
+    summary = _build_grade_summary(
+        queries.summarize_grades(samples, commodity), deposit_name
+    )
+
+    return samples_grid, summary

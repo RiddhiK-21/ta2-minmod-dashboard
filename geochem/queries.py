@@ -212,14 +212,30 @@ def to_float(value: str | None) -> float | None:
         return None
 
 
+def paper_local_id(paper_uri: str) -> str:
+    """The paper's slug from its URI, e.g.
+    ".../resource/paper__2004-ono-etal" -> "2004-ono-etal".
+
+    This is the only place the publication year still survives: neither
+    gc:paper_year nor gc:paper_id has a single triple in the store (verified
+    live), so the URI is the last remaining carrier.
+    """
+    return paper_uri.rsplit("/", 1)[-1].removeprefix("paper__")
+
+
 def resolve_year(raw_year: str | None, paper_id: str | None) -> int | None:
-    """gc:paper_year exists in the source extraction but is missing from the
-    RDF triples actually loaded into Fuseki -- ingestion drops it upstream,
-    not a query issue, so in practice every Year value comes from the
-    fallback. Prefer the real predicate so this self-corrects once ingestion
-    is fixed; fall back to the leading 4-digit year every paper_id starts
-    with (e.g. "2004_Ono_etal", or "2020A_Cave_etal" when a year/author
-    combo has multiple papers)."""
+    """Year of publication, from the first source that actually carries it.
+
+    gc:paper_year exists in the source extraction but is dropped by ingestion
+    before it reaches Fuseki, and gc:paper_id -- the documented fallback -- is
+    now absent too: both have zero triples in the store. So in practice every
+    Year comes from the paper URI slug via paper_local_id(). The predicates
+    are still read first so this self-corrects if ingestion is fixed.
+
+    Both the slug ("2004-ono-etal") and the old paper_id form
+    ("2004_Ono_etal", or "2020A_Cave_etal" when a year/author combo has
+    several papers) start with the 4-digit year, so one parse covers both.
+    """
     if raw_year and raw_year.isdigit():
         year = int(raw_year)
         if 1900 <= year <= 2100:
@@ -281,7 +297,7 @@ WHERE {{
       ?site gc:has_sample/gc:has_analysis/gc:element ?element .
     }}
   }}
-  ?site mo:country/mo:observed_name ?country .
+  ?site mo:location_info/mo:country/mo:observed_name ?country .
 }}
 ORDER BY ?country
 """
@@ -315,15 +331,16 @@ WHERE {{
     SELECT DISTINCT ?paper WHERE {{
       ?element rdfs:label {commodity} .
       ?site gc:has_sample/gc:has_analysis/gc:element ?element .
-      ?site mo:country/mo:observed_name {country} .
+      ?site mo:location_info/mo:country/mo:observed_name {country} .
       ?paper gc:has_mineral_site ?site .
     }}
   }}
 """ + _PAPER_METADATA + "}}"
 
 # Site display name is rdfs:label -- mo:name does not exist on Site nodes.
-# country/state_or_province point at a CandidateEntity, so the readable value
-# is one hop further on via mo:observed_name.
+# Country/state hang off mo:location_info, not off the site directly, and each
+# points at a CandidateEntity, so the readable value is one further hop via
+# mo:observed_name. Same path as _COUNTRIES.
 _DEPOSITS = """
 SELECT ?site ?deposit_name ?country ?state ?deposit_type_text ?deposit_type_confidence
 WHERE {{
@@ -336,8 +353,8 @@ WHERE {{
     }}
   }}
   OPTIONAL {{ ?site rdfs:label ?deposit_name }}
-  OPTIONAL {{ ?site mo:country/mo:observed_name ?country }}
-  OPTIONAL {{ ?site mo:state_or_province/mo:observed_name ?state }}
+  OPTIONAL {{ ?site mo:location_info/mo:country/mo:observed_name ?country }}
+  OPTIONAL {{ ?site mo:location_info/mo:state_or_province/mo:observed_name ?state }}
   OPTIONAL {{
     ?site mo:deposit_type_candidate ?dt .
     OPTIONAL {{ ?dt mo:observed_name ?deposit_type_text }}
@@ -364,18 +381,6 @@ WHERE {{
   OPTIONAL {{ ?analysis gc:analysis_id       ?analysis_id }}
   OPTIONAL {{ ?analysis gc:analytical_method ?analytical_method }}
   OPTIONAL {{ ?element  gc:grade             ?grade }}
-}}
-"""
-
-# Same walk as _SAMPLES, but bound by the paper rather than one site, and
-# projecting only what's needed to aggregate a grade -- no sample/analysis
-# metadata. Still bounded via VALUES, same cost class as _DEPOSITS.
-_GRADE_STATS = """
-SELECT ?element ?grade WHERE {{
-  VALUES ?paper {{ {paper_uri} }}
-  ?paper gc:has_mineral_site/gc:has_sample/gc:has_analysis/gc:element ?element .
-  ?element rdfs:label {commodity} .
-  OPTIONAL {{ ?element gc:grade ?grade }}
 }}
 """
 
@@ -421,7 +426,9 @@ def get_papers(commodity: str, country: str | None = None) -> list[dict]:
             "paper_uri": row["paper"],
             "title": row.get("title"),
             "journal": row.get("journal"),
-            "year": resolve_year(row.get("year"), row.get("paperId")),
+            "year": resolve_year(
+                row.get("year"), row.get("paperId") or paper_local_id(row["paper"])
+            ),
             "doi": row.get("doi"),
         }
         for row in _first_per(sparql(query), "paper")
@@ -504,17 +511,15 @@ def get_samples(site_uri: str, commodity: str) -> list[dict]:
     return samples
 
 
-def get_grade_stats(paper_uri: str, commodity: str) -> dict:
-    """Min/max/avg/median grade of `commodity` across every deposit site in
-    `paper_uri` -- not scoped to any single deposit. Bounded by the paper
-    URI via VALUES, same cost class as get_deposits.
+def summarize_grades(samples: list[dict], commodity: str) -> dict:
+    """Min/max/avg/median grade of `commodity` over `samples`.
+
+    Pure, and deliberately not a query: the rows come from get_samples(),
+    which is already pinned to one site, so the summary describes exactly the
+    measurements in the grid rather than re-querying for them. Rows with no
+    numeric grade are skipped -- gc:grade is OPTIONAL in _SAMPLES.
     """
-    rows = sparql(
-        _GRADE_STATS.format(paper_uri=_iri(paper_uri), commodity=_lit(commodity)),
-        timeout=TIMEOUT_BOUNDED,
-    )
-    grades = [to_float(row.get("grade")) for row in _first_per(rows, "element")]
-    grades = [g for g in grades if g is not None]
+    grades = [s["grade"] for s in samples if s.get("grade") is not None]
 
     if not grades:
         return {
