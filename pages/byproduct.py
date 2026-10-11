@@ -66,20 +66,20 @@ layout = html.Div(
             )
         ),
         html.Br(),
-        html.H5("Samples"),
+        html.H5("Grade Summary"),
         dbc.Row(
             dbc.Spinner(
-                html.Div(id="bp-samples-results"),
+                html.Div(id="bp-summary-results"),
                 color="primary",
                 type="border",
                 size="lg",
             )
         ),
         html.Br(),
-        html.H5("Grade Summary"),
+        html.H5("Samples"),
         dbc.Row(
             dbc.Spinner(
-                html.Div(id="bp-summary-results"),
+                html.Div(id="bp-samples-results"),
                 color="primary",
                 type="border",
                 size="lg",
@@ -314,7 +314,7 @@ def bp_update_samples(selected_rows, commodity):
 
     samples_grid = _build_samples_grid(samples) if samples else _no_results_alert()
     # Derived from the rows just fetched, so the summary cannot disagree with
-    # the grid above it.
+    # the grid below it.
     summary = _build_grade_summary(
         queries.summarize_grades(samples, commodity), deposit_name
     )

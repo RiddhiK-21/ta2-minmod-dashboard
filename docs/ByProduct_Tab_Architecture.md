@@ -67,7 +67,7 @@ Three properties of this store are easy to get wrong and are worth stating expli
 
 - **The site display name is `rdfs:label`, not `mo:name`.** `mo:name` does not exist on Site nodes; querying it yields empty deposit names.
 - **`country` and `state_or_province` are not literals.** They point at a CandidateEntity whose readable value is one hop further on, via `mo:observed_name`.
-- **`gc:paper_year` has zero triples in the store.** The value exists in the upstream extraction but is dropped during ingestion. Every Year shown in the UI is derived from the leading four digits of `gc:paper_id` (`"2004_Ono_etal"` → 2004). If ingestion is fixed, the code prefers the real predicate automatically.
+- **`gc:paper_year` has zero triples in the store.** The value exists in the upstream extraction but is dropped during ingestion, so the Year column is blank for every paper. The UI reports the year from that predicate only, and will populate on its own once ingestion is fixed; deriving it from `gc:paper_id` or from the paper URI slug was tried and deliberately reverted, since neither is the year as recorded in the data.
 
 ---
 
@@ -191,7 +191,7 @@ Two files:
 
 ### Details that are load-bearing
 
-**Sorting and null-handling happen in Python, not SPARQL.** `year` is derived from `paper_id`, so SPARQL cannot sort on it at all. Separately, SPARQL's `ORDER BY` places *unbound* values first, whereas the previous SQL placed `NULL`s last — so sorting client-side is what preserves the existing behaviour rather than a departure from it.
+**Sorting and null-handling happen in Python, not SPARQL.** `year` is parsed and range-checked in Python, so SPARQL cannot sort on it. Separately, SPARQL's `ORDER BY` places *unbound* values first, whereas the previous SQL placed `NULL`s last — so sorting client-side is what preserves the existing behaviour rather than a departure from it.
 
 **Numeric coercion is required, not polish.** Raw SPARQL JSON returns `mo:confidence` as the string `"9.2E-1"` and some grades in forms like `"9.3e-05"`. Without `to_float()` the grid would display `9.2E-1` and sort the Grade column as text — a silent regression against the old `REAL`/`DOUBLE PRECISION` columns.
 

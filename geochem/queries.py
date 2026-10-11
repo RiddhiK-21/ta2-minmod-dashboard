@@ -212,36 +212,17 @@ def to_float(value: str | None) -> float | None:
         return None
 
 
-def paper_local_id(paper_uri: str) -> str:
-    """The paper's slug from its URI, e.g.
-    ".../resource/paper__2004-ono-etal" -> "2004-ono-etal".
+def resolve_year(raw_year: str | None) -> int | None:
+    """Year of publication, read only from gc:paper_year.
 
-    This is the only place the publication year still survives: neither
-    gc:paper_year nor gc:paper_id has a single triple in the store (verified
-    live), so the URI is the last remaining carrier.
-    """
-    return paper_uri.rsplit("/", 1)[-1].removeprefix("paper__")
-
-
-def resolve_year(raw_year: str | None, paper_id: str | None) -> int | None:
-    """Year of publication, from the first source that actually carries it.
-
-    gc:paper_year exists in the source extraction but is dropped by ingestion
-    before it reaches Fuseki, and gc:paper_id -- the documented fallback -- is
-    now absent too: both have zero triples in the store. So in practice every
-    Year comes from the paper URI slug via paper_local_id(). The predicates
-    are still read first so this self-corrects if ingestion is fixed.
-
-    Both the slug ("2004-ono-etal") and the old paper_id form
-    ("2004_Ono_etal", or "2020A_Cave_etal" when a year/author combo has
-    several papers) start with the 4-digit year, so one parse covers both.
+    gc:paper_year is the ontology's year predicate, but it currently has zero
+    triples in the store -- ingestion drops it upstream -- so the Year column
+    renders blank. That is intentional: the year is reported from the data or
+    not at all, and this starts working on its own once ingestion is fixed.
+    Deriving it from the paper URI slug was tried and deliberately reverted.
     """
     if raw_year and raw_year.isdigit():
         year = int(raw_year)
-        if 1900 <= year <= 2100:
-            return year
-    if paper_id and len(paper_id) >= 4 and paper_id[:4].isdigit():
-        year = int(paper_id[:4])
         if 1900 <= year <= 2100:
             return year
     return None
@@ -306,12 +287,11 @@ _PAPER_METADATA = """
   OPTIONAL {{ ?paper gc:paper_title   ?title }}
   OPTIONAL {{ ?paper gc:paper_journal ?journal }}
   OPTIONAL {{ ?paper gc:paper_year    ?year }}
-  OPTIONAL {{ ?paper gc:paper_id      ?paperId }}
   OPTIONAL {{ ?paper gc:paper_doi     ?doi }}
 """
 
 _PAPERS = """
-SELECT ?paper ?title ?journal ?year ?paperId ?doi
+SELECT ?paper ?title ?journal ?year ?doi
 WHERE {{
   {{
     SELECT DISTINCT ?paper WHERE {{
@@ -325,7 +305,7 @@ WHERE {{
 # in that country which measured that commodity", rather than two independent
 # conditions on the paper.
 _PAPERS_BY_COUNTRY = """
-SELECT ?paper ?title ?journal ?year ?paperId ?doi
+SELECT ?paper ?title ?journal ?year ?doi
 WHERE {{
   {{
     SELECT DISTINCT ?paper WHERE {{
@@ -426,9 +406,7 @@ def get_papers(commodity: str, country: str | None = None) -> list[dict]:
             "paper_uri": row["paper"],
             "title": row.get("title"),
             "journal": row.get("journal"),
-            "year": resolve_year(
-                row.get("year"), row.get("paperId") or paper_local_id(row["paper"])
-            ),
+            "year": resolve_year(row.get("year")),
             "doi": row.get("doi"),
         }
         for row in _first_per(sparql(query), "paper")
