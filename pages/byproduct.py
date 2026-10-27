@@ -5,7 +5,7 @@ from dash.dependencies import Input, Output, State
 from dash_ag_grid import AgGrid
 
 from components import stats_card
-from geochem import queries
+from geochem import api
 from logger_config import logger
 
 
@@ -133,7 +133,7 @@ def _build_papers_grid(papers):
             "paginationPageSize": 20,
             "suppressFieldDotNotation": True,
             "enableCellTextSelection": True,
-            "getRowId": {"function": "params.data.paper_uri"},
+            "getRowId": {"function": "params.data.paper_id"},
         },
     )
 
@@ -159,7 +159,7 @@ def _build_deposits_grid(deposits):
             "paginationPageSize": 20,
             "suppressFieldDotNotation": True,
             "enableCellTextSelection": True,
-            "getRowId": {"function": "params.data.site_uri"},
+            "getRowId": {"function": "params.data.site_id"},
         },
     )
 
@@ -191,8 +191,8 @@ def _build_samples_grid(samples):
 
 
 def _build_grade_summary(stats, deposit_name=None):
-    commodity = stats["commodity"]
-    # deposit_name is an OPTIONAL in _DEPOSITS, so it can be unbound.
+    commodity = api.element_name(stats["commodity"])
+    # A site's name is optional in the API, so it can be missing.
     heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
 
     if stats["count"] == 0:
@@ -229,8 +229,8 @@ def bp_load_commodities(pathname):
     # Must degrade rather than raise: if this throws, the page renders
     # nothing at all, not even the layout.
     try:
-        return [{"label": c, "value": c} for c in queries.get_commodities()]
-    except queries.GeochemQueryError:
+        return api.get_commodities()
+    except api.GeochemAPIError:
         logger.exception("Could not load GeoChem commodities")
         return []
 
@@ -249,14 +249,12 @@ def bp_update_papers(commodity, country):
     if not commodity:
         return [], html.Div(), html.Div(), html.Div(), html.Div()
 
-    # One try around both queries -- either failing means the same thing to
+    # One try around both calls -- either failing means the same thing to
     # the user.
     try:
-        country_options = [
-            {"label": c, "value": c} for c in queries.get_countries(commodity)
-        ]
-        papers = queries.get_papers(commodity, country)
-    except queries.GeochemQueryError as exc:
+        country_options = api.get_countries(commodity)
+        papers = api.get_papers(commodity, country)
+    except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem papers for %s", commodity)
         return [], _error_alert(exc), html.Div(), html.Div(), html.Div()
 
@@ -279,11 +277,11 @@ def bp_update_deposits(selected_rows, commodity):
     if not selected_rows or not commodity:
         return html.Div(), html.Div(), html.Div()
 
-    paper_uri = selected_rows[0]["paper_uri"]
+    paper_id = selected_rows[0]["paper_id"]
     try:
-        deposits = queries.get_deposits(paper_uri, commodity)
-    except queries.GeochemQueryError as exc:
-        logger.exception("Could not load GeoChem deposits for %s", paper_uri)
+        deposits = api.get_deposits(paper_id, commodity)
+    except api.GeochemAPIError as exc:
+        logger.exception("Could not load GeoChem deposits for %s", paper_id)
         return _error_alert(exc), html.Div(), html.Div()
 
     deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
@@ -304,19 +302,20 @@ def bp_update_samples(selected_rows, commodity):
     if not selected_rows or not commodity:
         return html.Div(), html.Div()
 
-    site_uri = selected_rows[0]["site_uri"]
+    paper_id = selected_rows[0]["paper_id"]
+    site_id = selected_rows[0]["site_id"]
     deposit_name = selected_rows[0].get("deposit_name")
     try:
-        samples = queries.get_samples(site_uri, commodity)
-    except queries.GeochemQueryError as exc:
-        logger.exception("Could not load GeoChem samples for %s", site_uri)
+        samples = api.get_samples(paper_id, site_id, commodity)
+    except api.GeochemAPIError as exc:
+        logger.exception("Could not load GeoChem samples for %s", site_id)
         return _error_alert(exc), html.Div()
 
     samples_grid = _build_samples_grid(samples) if samples else _no_results_alert()
     # Derived from the rows just fetched, so the summary cannot disagree with
     # the grid below it.
     summary = _build_grade_summary(
-        queries.summarize_grades(samples, commodity), deposit_name
+        api.summarize_grades(samples, commodity), deposit_name
     )
 
     return samples_grid, summary
